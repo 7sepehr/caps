@@ -22,8 +22,8 @@ class Forecast(Model):
     time_key = IntegerField()
     pvp_is_competitora = FloatField()
     pvp_is_competitorb = FloatField()
-    # pvp_is_competitora_actual = FloatField(null=True)
-    # pvp_is_competitorb_actual = FloatField(null=True)
+    pvp_is_competitora_actual = FloatField(null=True)
+    pvp_is_competitorb_actual = FloatField(null=True)
 
     class Meta:
         database = DB
@@ -126,6 +126,8 @@ def actual_prices(req: ActualPricesRequest):
         raise HTTPException(status_code=422, detail="Forecast not found for this SKU and date.")
 
     # Save the actual prices
+    PA=record.pvp_is_competitora
+    PB=record.pvp_is_competitorb
     record.pvp_is_competitora = req.pvp_is_competitorA_actual
     record.pvp_is_competitorb = req.pvp_is_competitorB_actual
     record.save()
@@ -133,8 +135,8 @@ def actual_prices(req: ActualPricesRequest):
     return {
         "sku": record.sku,
         "time_key": record.time_key,
-        "pvp_is_competitorA": record.pvp_is_competitora,
-        "pvp_is_competitorB": record.pvp_is_competitorb,
+        "pvp_is_competitorA": PA,
+        "pvp_is_competitorB": PB,
         "pvp_is_competitorA_actual": req.pvp_is_competitorA_actual,
         "pvp_is_competitorB_actual": req.pvp_is_competitorB_actual,
     }
