@@ -1,88 +1,112 @@
-from pathlib import Path
-import zipfile
-from textwrap import dedent
 
-# Simplified main.py using DATABASE_URL for Railway compatibility
-main_py = dedent("""
-    from fastapi import FastAPI, HTTPException
-    from pydantic import BaseModel
-    from peewee import *
-    from playhouse.db_url import connect
-    import os
+import os
+import joblib
+import pandas as pd
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+from peewee import *
+from playhouse.db_url import connect
 
-    DB = connect(os.environ.get("DATABASE_URL"))
+# Load environment-based database connection
+DB = connect(os.environ.get("DATABASE_URL"))
 
-    class BaseModelORM(Model):
-        class Meta:
-            database = DB
+# Load pre-trained model pipeline
+try:
+    model = joblib.load("lightgbm_pipeline_model.pkl")
+except Exception as e:
+    raise RuntimeError("Model file could not be loaded: {}".format(str(e)))
 
-    class Forecast(BaseModelORM):
-        sku = CharField()
-        time_key = IntegerField()
-        pvp_is_competitorA = FloatField()
-        pvp_is_competitorB = FloatField()
-        pvp_is_competitorA_actual = FloatField(null=True)
-        pvp_is_competitorB_actual = FloatField(null=True)
+class BaseModelORM(Model):
+    class Meta:
+        database = DB
 
-        class Meta:
-            primary_key = CompositeKey('sku', 'time_key')
+class Forecast(BaseModelORM):
+    sku = CharField()
+    time_key = IntegerField()
+    pvp_is_competitorA = FloatField()
+    pvp_is_competitorB = FloatField()
+    pvp_is_competitorA_actual = FloatField(null=True)
+    pvp_is_competitorB_actual = FloatField(null=True)
 
-    class ForecastRequest(BaseModel):
-        sku: str
-        time_key: int
+    class Meta:
+        primary_key = CompositeKey('sku', 'time_key')
 
-    class ActualPricesRequest(BaseModel):
-        sku: str
-        time_key: int
-        pvp_is_competitorA_actual: float
-        pvp_is_competitorB_actual: float
+class ForecastRequest(BaseModel):
+    sku: str
+    time_key: int
+    quantity: float = 1.0
+    discount: float = 0.0
+    flag_promo: str = "0"
+    leaflet: str = "None"
+    structure_level_1: str = "None"
+    structure_level_2: str = "None"
+    month: int = 1
+    dayofweek: int = 0
+    is_weekend: int = 0
+    is_campaign: int = 0
 
-    app = FastAPI()
+class ActualPricesRequest(BaseModel):
+    sku: str
+    time_key: int
+    pvp_is_competitorA_actual: float
+    pvp_is_competitorB_actual: float
 
-    @app.on_event("startup")
-    def startup():
-        DB.connect()
-        DB.create_tables([Forecast], safe=True)
+app = FastAPI()
 
-    @app.post("/forecast_prices/")
-    def get_forecast(req: ForecastRequest):
-        record = Forecast.get_or_none((Forecast.sku == req.sku) & (Forecast.time_key == req.time_key))
-        if not record:
-            raise HTTPException(status_code=422, detail="SKU/time_key pair not found.")
-        return {
-            "sku": record.sku,
-            "time_key": record.time_key,
-            "pvp_is_competitorA": record.pvp_is_competitorA,
-            "pvp_is_competitorB": record.pvp_is_competitorB
-        }
+@app.on_event("startup")
+def startup():
+    DB.connect()
+    DB.create_tables([Forecast], safe=True)
 
-    @app.post("/actual_prices/")
-    def update_actual_prices(req: ActualPricesRequest):
-        record = Forecast.get_or_none((Forecast.sku == req.sku) & (Forecast.time_key == req.time_key))
-        if not record:
-            raise HTTPException(status_code=422, detail="SKU/time_key pair not found.")
-        record.pvp_is_competitorA_actual = req.pvp_is_competitorA_actual
-        record.pvp_is_competitorB_actual = req.pvp_is_competitorB_actual
-        record.save()
-        return {
-            "sku": record.sku,
-            "time_key": record.time_key,
-            "pvp_is_competitorA": record.pvp_is_competitorA,
-            "pvp_is_competitorB": record.pvp_is_competitorB,
-            "pvp_is_competitorA_actual": record.pvp_is_competitorA_actual,
-            "pvp_is_competitorB_actual": record.pvp_is_competitorB_actual
-        }
-""")
+@app.post("/forecast_prices/")
+def forecast_prices(req: ForecastRequest):
+    features = pd.DataFrame([{
+        "sku": req.sku,
+        "competitor": "competitorA",
+        "quantity": req.quantity,
+        "discount": req.discount,
+        "flag_promo": req.flag_promo,
+        "leaflet": req.leaflet,
+        "structure_level_1": req.structure_level_1,
+        "structure_level_2": req.structure_level_2,
+        "month": req.month,
+        "dayofweek": req.dayofweek,
+        "is_weekend": req.is_weekend,
+        "is_campaign": req.is_campaign
+    }])
 
-# Create the folder structure and write main.py
-api_folder = Path("/mnt/data/api_with_db_url")
-api_folder.mkdir(exist_ok=True)
+    pred_A = model.predict(features)[0]
 
-(api_folder / "main.py").write_text(main_py)
+    features["competitor"] = "competitorB"
+    pred_B = model.predict(features)[0]
 
-# Create ZIP file
-zip_path = "/mnt/data/forecast_api_dburl.zip"
-with zipfile.ZipFile(zip_path, "w") as zipf:
-    zipf.write(api_folder / "main.py", arcname="main.py")
+    Forecast.insert({
+        Forecast.sku: req.sku,
+        Forecast.time_key: req.time_key,
+        Forecast.pvp_is_competitorA: pred_A,
+        Forecast.pvp_is_competitorB: pred_B,
+    }).on_conflict_replace().execute()
 
-zip_path
+    return {
+        "sku": req.sku,
+        "time_key": req.time_key,
+        "pvp_is_competitorA": pred_A,
+        "pvp_is_competitorB": pred_B
+    }
+
+@app.post("/actual_prices/")
+def update_actual_prices(req: ActualPricesRequest):
+    record = Forecast.get_or_none((Forecast.sku == req.sku) & (Forecast.time_key == req.time_key))
+    if not record:
+        raise HTTPException(status_code=422, detail="SKU/time_key pair not found.")
+    record.pvp_is_competitorA_actual = req.pvp_is_competitorA_actual
+    record.pvp_is_competitorB_actual = req.pvp_is_competitorB_actual
+    record.save()
+    return {
+        "sku": record.sku,
+        "time_key": record.time_key,
+        "pvp_is_competitorA": record.pvp_is_competitorA,
+        "pvp_is_competitorB": record.pvp_is_competitorB,
+        "pvp_is_competitorA_actual": record.pvp_is_competitorA_actual,
+        "pvp_is_competitorB_actual": record.pvp_is_competitorB_actual,
+    }
