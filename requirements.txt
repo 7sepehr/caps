@@ -7,3 +7,4 @@ pandas
 scikit-learn
 lightgbm
 holidays
+psycopg2-binary
