@@ -1,80 +1,74 @@
 
-import os
-import csv
-from pathlib import Path
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from playhouse.db_url import connect
-from peewee import Model, CharField, IntegerField, FloatField
+from peewee import *
+import os
 
-# Connect to Railway PostgreSQL or fallback to SQLite
-DB = connect(os.environ.get("DATABASE_URL") or "sqlite:///predictions.db")
+DB = PostgresqlDatabase(
+    os.environ.get("PGDATABASE", "railway"),
+    user=os.environ.get("PGUSER", "postgres"),
+    password=os.environ.get("PGPASSWORD", "password"),
+    host=os.environ.get("PGHOST", "localhost"),
+    port=int(os.environ.get("PGPORT", 5432))
+)
 
-class Forecast(Model):
+class BaseModelORM(Model):
+    class Meta:
+        database = DB
+
+class Forecast(BaseModelORM):
     sku = CharField()
     time_key = IntegerField()
-    pvp_is_competitora = FloatField(null=True)
-    pvp_is_competitorb = FloatField(null=True)
+    pvp_is_competitorA = FloatField()
+    pvp_is_competitorB = FloatField()
+    pvp_is_competitorA_actual = FloatField(null=True)
+    pvp_is_competitorB_actual = FloatField(null=True)
 
     class Meta:
-        table_name = "forecast"
-        database = DB
-        primary_key = False
-
-DB.connect()
-DB.create_tables([Forecast])
-
-# Auto-load CSV if DB is empty, then delete it
-csv_path = Path("forecasts.csv")
-if Forecast.select().count() == 0 and csv_path.exists():
-    with open(csv_path, newline='') as f:
-        reader = csv.DictReader(f)
-        with DB.atomic():
-            for row in reader:
-                Forecast.create(
-                    sku=row["sku"],
-                    time_key=int(row["time_key"]),
-                    pvp_is_competitora=float(row["pvp_is_competitora"]) if row["pvp_is_competitora"] else None,
-                    pvp_is_competitorb=float(row["pvp_is_competitorb"]) if row["pvp_is_competitorb"] else None
-                )
-    os.remove(csv_path)
-
-app = FastAPI()
+        primary_key = CompositeKey('sku', 'time_key')
 
 class ForecastRequest(BaseModel):
     sku: str
     time_key: int
 
-class ActualPriceRequest(BaseModel):
+class ActualPricesRequest(BaseModel):
     sku: str
     time_key: int
     pvp_is_competitorA_actual: float
     pvp_is_competitorB_actual: float
 
+app = FastAPI()
+
+@app.on_event("startup")
+def startup():
+    DB.connect()
+    DB.create_tables([Forecast], safe=True)
+
 @app.post("/forecast_prices/")
-def forecast_prices(req: ForecastRequest):
-    try:
-        record = Forecast.get((Forecast.sku == req.sku) & (Forecast.time_key == req.time_key))
-        return {
-            "sku": req.sku,
-            "time_key": req.time_key,
-            "pvp_is_competitorA": record.pvp_is_competitora,
-            "pvp_is_competitorB": record.pvp_is_competitorb
-        }
-    except Forecast.DoesNotExist:
-        raise HTTPException(status_code=422, detail="sku/time_key pair not found")
+def get_forecast(req: ForecastRequest):
+    record = Forecast.get_or_none((Forecast.sku == req.sku) & (Forecast.time_key == req.time_key))
+    if not record:
+        raise HTTPException(status_code=422, detail="SKU/time_key pair not found.")
+    return {
+        "sku": record.sku,
+        "time_key": record.time_key,
+        "pvp_is_competitorA": record.pvp_is_competitorA,
+        "pvp_is_competitorB": record.pvp_is_competitorB
+    }
 
 @app.post("/actual_prices/")
-def actual_prices(req: ActualPriceRequest):
-    try:
-        record = Forecast.get((Forecast.sku == req.sku) & (Forecast.time_key == req.time_key))
-        return {
-            "sku": req.sku,
-            "time_key": req.time_key,
-            "pvp_is_competitorA": record.pvp_is_competitora,
-            "pvp_is_competitorB": record.pvp_is_competitorb,
-            "pvp_is_competitorA_actual": req.pvp_is_competitorA_actual,
-            "pvp_is_competitorB_actual": req.pvp_is_competitorB_actual
-        }
-    except Forecast.DoesNotExist:
-        raise HTTPException(status_code=422, detail="sku/time_key pair not found")
+def update_actual_prices(req: ActualPricesRequest):
+    record = Forecast.get_or_none((Forecast.sku == req.sku) & (Forecast.time_key == req.time_key))
+    if not record:
+        raise HTTPException(status_code=422, detail="SKU/time_key pair not found.")
+    record.pvp_is_competitorA_actual = req.pvp_is_competitorA_actual
+    record.pvp_is_competitorB_actual = req.pvp_is_competitorB_actual
+    record.save()
+    return {
+        "sku": record.sku,
+        "time_key": record.time_key,
+        "pvp_is_competitorA": record.pvp_is_competitorA,
+        "pvp_is_competitorB": record.pvp_is_competitorB,
+        "pvp_is_competitorA_actual": record.pvp_is_competitorA_actual,
+        "pvp_is_competitorB_actual": record.pvp_is_competitorB_actual
+    }
