@@ -20,10 +20,10 @@ DB = connect(DATABASE_URL)
 class Forecast(Model):
     sku = CharField()
     time_key = IntegerField()
-    pvp_is_competitorA = FloatField()
-    pvp_is_competitorB = FloatField()
-    pvp_is_competitorA_actual = FloatField(null=True)
-    pvp_is_competitorB_actual = FloatField(null=True)
+    pvp_is_competitora = FloatField()
+    pvp_is_competitorb = FloatField()
+    pvp_is_competitora_actual = FloatField(null=True)
+    pvp_is_competitorb_actual = FloatField(null=True)
 
     class Meta:
         database = DB
@@ -37,8 +37,8 @@ class ForecastRequest(BaseModel):
 class ActualPricesRequest(BaseModel):
     sku: str
     time_key: int
-    pvp_is_competitorA_actual: float
-    pvp_is_competitorB_actual: float
+    pvp_is_competitora_actual: float
+    pvp_is_competitorb_actual: float
 
 # === Load Trained LightGBM Model ===
 MODEL_PATH = "lightgbm_pipeline_model.pkl"
@@ -88,33 +88,33 @@ def forecast_prices(req: ForecastRequest):
     }
 
     # Predict for competitor A
-    df_A = pd.DataFrame([{**base_features, "competitor": "competitorA"}])
+    df_A = pd.DataFrame([{**base_features, "competitor": "competitora"}])
     pred_A = float(model.predict(df_A)[0])
 
     # Predict for competitor B
-    df_B = pd.DataFrame([{**base_features, "competitor": "competitorB"}])
+    df_B = pd.DataFrame([{**base_features, "competitor": "competitorb"}])
     pred_B = float(model.predict(df_B)[0])
 
     # Insert or update forecast in the database
     Forecast.insert({
     "sku": req.sku,
     "time_key": req.time_key,
-    "pvp_is_competitorA": pred_A,
-    "pvp_is_competitorB": pred_B,
+    "pvp_is_competitora": pred_A,
+    "pvp_is_competitorb": pred_B,
 }).on_conflict(
     conflict_target=["sku", "time_key"],
     preserve=["sku", "time_key"],
     update={
-        "pvp_is_competitorA": pred_A,
-        "pvp_is_competitorB": pred_B,
+        "pvp_is_competitora": pred_A,
+        "pvp_is_competitorb": pred_B,
     }
 ).execute()
 
     return {
         "sku": req.sku,
         "time_key": req.time_key,
-        "pvp_is_competitorA": pred_A,
-        "pvp_is_competitorB": pred_B,
+        "pvp_is_competitora": pred_A,
+        "pvp_is_competitorb": pred_B,
     }
 
 # === Endpoint: /actual_prices/ ===
@@ -126,15 +126,15 @@ def actual_prices(req: ActualPricesRequest):
         raise HTTPException(status_code=422, detail="Forecast not found for this SKU and date.")
 
     # Save the actual prices
-    record.pvp_is_competitorA_actual = req.pvp_is_competitorA_actual
-    record.pvp_is_competitorB_actual = req.pvp_is_competitorB_actual
+    record.pvp_is_competitora_actual = req.pvp_is_competitora_actual
+    record.pvp_is_competitorb_actual = req.pvp_is_competitorb_actual
     record.save()
 
     return {
         "sku": record.sku,
         "time_key": record.time_key,
-        "pvp_is_competitorA": record.pvp_is_competitorA,
-        "pvp_is_competitorB": record.pvp_is_competitorB,
-        "pvp_is_competitorA_actual": record.pvp_is_competitorA_actual,
-        "pvp_is_competitorB_actual": record.pvp_is_competitorB_actual,
+        "pvp_is_competitora": record.pvp_is_competitora,
+        "pvp_is_competitorb": record.pvp_is_competitorb,
+        "pvp_is_competitora_actual": record.pvp_is_competitora_actual,
+        "pvp_is_competitorb_actual": record.pvp_is_competitorb_actual,
     }
