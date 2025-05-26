@@ -96,23 +96,19 @@ def forecast_prices(req: ForecastRequest):
     pred_B = float(model.predict(df_B)[0])
 
     # Insert or update forecast in the database
-    (Forecast
-     .insert({
-         Forecast.sku: req.sku,
-         Forecast.time_key: req.time_key,
-         Forecast.pvp_is_competitorA: pred_A,
-         Forecast.pvp_is_competitorB: pred_B,
-     })
-     .on_conflict(
-         conflict_target=[Forecast.sku, Forecast.time_key],
-         preserve=[],
-         update={
-             Forecast.pvp_is_competitorA: pred_A,
-             Forecast.pvp_is_competitorB: pred_B,
-         }
-     )
-     .execute()
-    )
+    Forecast.insert({
+    "sku": req.sku,
+    "time_key": req.time_key,
+    "pvp_is_competitorA": pred_A,
+    "pvp_is_competitorB": pred_B,
+}).on_conflict(
+    conflict_target=["sku", "time_key"],
+    preserve=["sku", "time_key"],
+    update={
+        "pvp_is_competitorA": pred_A,
+        "pvp_is_competitorB": pred_B,
+    }
+).execute()
 
     return {
         "sku": req.sku,
