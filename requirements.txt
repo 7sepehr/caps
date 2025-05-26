@@ -1,6 +1,9 @@
-
 fastapi
 uvicorn
 peewee
+playhouse
 psycopg2-binary
-pydantic
+joblib
+pandas
+scikit-learn
+lightgbm
