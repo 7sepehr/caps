@@ -135,6 +135,6 @@ def actual_prices(req: ActualPricesRequest):
         "time_key": record.time_key,
         "pvp_is_competitorA": record.pvp_is_competitora,
         "pvp_is_competitorB": record.pvp_is_competitorb,
-        "pvp_is_competitorA_actual": record.pvp_is_competitora_actual,
-        "pvp_is_competitorB_actual": record.pvp_is_competitorb_actual,
+        "pvp_is_competitorA_actual": req.pvp_is_competitorA_actual,
+        "pvp_is_competitorB_actual": req.pvp_is_competitorB_actual,
     }
