@@ -37,8 +37,8 @@ class ForecastRequest(BaseModel):
 class ActualPricesRequest(BaseModel):
     sku: str
     time_key: int
-    pvp_is_competitora_actual: float
-    pvp_is_competitorb_actual: float
+    pvp_is_competitorA_actual: float
+    pvp_is_competitorB_actual: float
 
 # === Load Trained LightGBM Model ===
 MODEL_PATH = "lightgbm_pipeline_model.pkl"
