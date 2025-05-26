@@ -4,7 +4,7 @@ peewee
 playhouse
 joblib
 pandas
-scikit-learn
+scikit-learn==1.5.1
 lightgbm
 holidays
 psycopg2-binary
