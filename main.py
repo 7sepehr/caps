@@ -81,11 +81,19 @@ def forecast_prices(req: ForecastRequest):
     pred_B = model.predict(features)[0]
 
     Forecast.insert({
-        Forecast.sku: req.sku,
-        Forecast.time_key: req.time_key,
+    Forecast.sku: req.sku,
+    Forecast.time_key: req.time_key,
+    Forecast.pvp_is_competitorA: pred_A,
+    Forecast.pvp_is_competitorB: pred_B,
+}).on_conflict(
+    on_conflict=peewee.ConflictWhere(
+        (Forecast.sku == req.sku) & (Forecast.time_key == req.time_key)
+    ),
+    update={
         Forecast.pvp_is_competitorA: pred_A,
         Forecast.pvp_is_competitorB: pred_B,
-    }).on_conflict_replace().execute()
+    }
+).execute()
 
     return {
         "sku": req.sku,
