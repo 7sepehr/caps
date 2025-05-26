@@ -126,15 +126,15 @@ def actual_prices(req: ActualPricesRequest):
         raise HTTPException(status_code=422, detail="Forecast not found for this SKU and date.")
 
     # Save the actual prices
-    record.pvp_is_competitora_actual = req.pvp_is_competitora_actual
-    record.pvp_is_competitorb_actual = req.pvp_is_competitorb_actual
+    record.pvp_is_competitora_actual = req.pvp_is_competitorA_actual
+    record.pvp_is_competitorb_actual = req.pvp_is_competitorB_actual
     record.save()
 
     return {
         "sku": record.sku,
         "time_key": record.time_key,
-        "pvp_is_competitora": record.pvp_is_competitora,
-        "pvp_is_competitorb": record.pvp_is_competitorb,
-        "pvp_is_competitora_actual": record.pvp_is_competitora_actual,
-        "pvp_is_competitorb_actual": record.pvp_is_competitorb_actual,
+        "pvp_is_competitorA": record.pvp_is_competitora,
+        "pvp_is_competitorB": record.pvp_is_competitorb,
+        "pvp_is_competitorA_actual": record.pvp_is_competitora_actual,
+        "pvp_is_competitorB_actual": record.pvp_is_competitorb_actual,
     }
