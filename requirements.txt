@@ -6,3 +6,4 @@ pandas
 # Add FastAPI if you want an API:
 fastapi
 uvicorn[standard]
+psycopg2-binary
