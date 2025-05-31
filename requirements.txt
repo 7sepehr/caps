@@ -4,5 +4,5 @@ joblib
 numpy
 pandas
 # Add FastAPI if you want an API:
-# fastapi
-# uvicorn[standard]
+fastapi
+uvicorn[standard]
