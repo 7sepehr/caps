@@ -4,7 +4,6 @@ from pydantic import BaseModel, Field
 import joblib
 import psycopg2
 import pandas as pd
-from typing import Optional
 
 # ------------------- Load Model Artifacts -------------------
 MODEL_PATH = "saved_models/competitor_price_forecaster.pkl"
@@ -37,11 +36,8 @@ def get_pg_conn():
 
 # ------------------- Helper Functions -------------------
 def prepare_features(sku, time_key):
-    """
-    Given sku and time_key, look up or build a default feature row for prediction.
-    This is a placeholder. In a real scenario, you would look up or compute all required features for prediction.
-    """
-    # Example: Try to look up product metadata from DB (you can expand this logic)
+    from datetime import datetime
+    # For simplicity, use DB metadata or defaults for demonstration. Expand as needed.
     metadata = None
     try:
         with get_pg_conn() as conn:
@@ -64,15 +60,9 @@ def prepare_features(sku, time_key):
                         "flag_promo": row[5],
                         "leaflet": row[6] or "none"
                     }
-    except Exception as e:
+    except Exception:
         metadata = None
 
-    # Build the full feature dict, with defaults if not found
-    # You should update this to reflect your real feature engineering logic.
-    # For demo, we fill with zeros/defaults.
-    from datetime import datetime
-
-    # Parse time_key to date
     try:
         date_obj = datetime.strptime(str(time_key), "%Y%m%d")
         year = date_obj.year
@@ -80,7 +70,7 @@ def prepare_features(sku, time_key):
         day = date_obj.day
         weekday = date_obj.weekday()
         quarter = (date_obj.month - 1)//3 + 1
-        week_of_year = int(date_obj.strftime("%V"))  # ISO week
+        week_of_year = int(date_obj.strftime("%V"))
     except Exception:
         year = month = day = weekday = quarter = week_of_year = 0
 
@@ -104,13 +94,9 @@ def prepare_features(sku, time_key):
         "is_campaign": 0,
         "time_key": time_key,
     }
-
-    # Add any missing columns to match feature_cols
     for col in feature_cols:
         if col not in features:
             features[col] = 0
-
-    # Leaflet encoding
     df = pd.DataFrame([features])
     df["leaflet_encoded"] = df["leaflet"].fillna("none")
     df["leaflet_numeric"] = leaflet_encoder.transform(df["leaflet_encoded"])
@@ -134,24 +120,48 @@ def upsert_forecast_to_db(sku, time_key, pvp_A, pvp_B):
             cur.execute(query, (sku, time_key, pvp_A, pvp_B))
         conn.commit()
 
-def upsert_actual_prices_to_db(sku, time_key, pvp_A_actual, pvp_B_actual):
+def update_actual_prices_in_db(sku, time_key, pvp_A_actual, pvp_B_actual):
     query = """
         UPDATE forecasts
         SET "pvp_is_competitorA_actual" = %s,
             "pvp_is_competitorB_actual" = %s
         WHERE sku=%s AND time_key=%s
+        RETURNING "pvp_is_competitorA", "pvp_is_competitorB"
     """
     with get_pg_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(query, (pvp_A_actual, pvp_B_actual, sku, time_key))
-            if cur.rowcount == 0:
-                # If not exist, insert new row with actuals
-                cur.execute("""
-                    INSERT INTO forecasts (sku, time_key, "pvp_is_competitorA_actual", "pvp_is_competitorB_actual")
-                    VALUES (%s, %s, %s, %s)
-                    ON CONFLICT (sku, time_key) DO NOTHING
-                """, (sku, time_key, pvp_A_actual, pvp_B_actual))
-        conn.commit()
+            row = cur.fetchone()
+            if row:
+                pvp_A, pvp_B = row
+                conn.commit()
+                return pvp_A, pvp_B
+            else:
+                return None
+
+def get_forecast_actuals(sku, time_key):
+    query = """
+        SELECT sku, time_key, "pvp_is_competitorA", "pvp_is_competitorB",
+               "pvp_is_competitorA_actual", "pvp_is_competitorB_actual"
+        FROM forecasts
+        WHERE sku=%s AND time_key=%s
+        LIMIT 1
+    """
+    with get_pg_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, (sku, time_key))
+            row = cur.fetchone()
+            if row:
+                return {
+                    "sku": row[0],
+                    "time_key": row[1],
+                    "pvp_is_competitorA": row[2],
+                    "pvp_is_competitorB": row[3],
+                    "pvp_is_competitorA_actual": row[4],
+                    "pvp_is_competitorB_actual": row[5],
+                }
+            else:
+                return None
 
 # ------------------- Schemas -------------------
 class ForecastReq(BaseModel):
@@ -170,6 +180,14 @@ class ActualPriceReq(BaseModel):
     pvp_is_competitorA_actual: float = Field(..., description="Actual price competitor A")
     pvp_is_competitorB_actual: float = Field(..., description="Actual price competitor B")
 
+class ActualPriceResp(BaseModel):
+    sku: str
+    time_key: int
+    pvp_is_competitorA: float
+    pvp_is_competitorB: float
+    pvp_is_competitorA_actual: float
+    pvp_is_competitorB_actual: float
+
 # ------------------- FastAPI App -------------------
 app = FastAPI(
     title="Competitor Price Forecasting API",
@@ -178,10 +196,8 @@ app = FastAPI(
 
 @app.post("/forecast_prices/", response_model=ForecastResp)
 def forecast_prices(req: ForecastReq):
-    # Validate input (Pydantic does this, but double check)
     if not req.sku or not isinstance(req.time_key, int):
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Invalid input format.")
-
     if forecaster is None:
         raise HTTPException(status_code=503, detail="Model not loaded")
 
@@ -190,7 +206,7 @@ def forecast_prices(req: ForecastReq):
     try:
         for comp in target_competitors:
             preds[comp] = float(forecaster.predict(X, comp)[0])
-    except Exception as e:
+    except Exception:
         raise HTTPException(status_code=500, detail="Prediction failed.")
 
     upsert_forecast_to_db(req.sku, req.time_key, preds.get("competitorA", 0), preds.get("competitorB", 0))
@@ -201,12 +217,28 @@ def forecast_prices(req: ForecastReq):
         pvp_is_competitorB=preds.get("competitorB", 0),
     )
 
-@app.post("/actual_prices/")
+@app.post("/actual_prices/", response_model=ActualPriceResp)
 def actual_prices(req: ActualPriceReq):
+    # Check input formatting
     if not req.sku or not isinstance(req.time_key, int):
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Invalid input format.")
-    try:
-        upsert_actual_prices_to_db(req.sku, req.time_key, req.pvp_is_competitorA_actual, req.pvp_is_competitorB_actual)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail="Could not save actual prices.")
-    return {"status": "success"}
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Invalid input format."
+        )
+    # Check if forecast exists and update actuals
+    update_result = update_actual_prices_in_db(
+        req.sku, req.time_key, req.pvp_is_competitorA_actual, req.pvp_is_competitorB_actual
+    )
+    if update_result is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Forecast for this product and date does not exist."
+        )
+    # Get the updated row
+    combined = get_forecast_actuals(req.sku, req.time_key)
+    if combined is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Could not retrieve updated values."
+        )
+    return ActualPriceResp(**combined)
