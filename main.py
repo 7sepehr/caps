@@ -38,11 +38,11 @@ def get_pg_conn():
 # ------------- FastAPI Setup -------------
 app = FastAPI(
     title="Competitor Price Forecasting API",
-    description="Predict competitor prices using a LightGBM ensemble model"
+    description="Predict and retrieve competitor prices using a LightGBM ensemble model"
 )
 
 # ------------- Pydantic Schemas -------------
-class PredictionRequest(BaseModel):
+class ForecastRequest(BaseModel):
     sku: str
     time_key: int
     pvp_was: float
@@ -61,14 +61,19 @@ class PredictionRequest(BaseModel):
     quarter: int
     week_of_year: int
     is_campaign: int
-    # Optionally: lag/rolling/comparison features if needed
 
-class BatchPredictionRequest(BaseModel):
-    items: List[PredictionRequest]
+class BatchForecastRequest(BaseModel):
+    items: List[ForecastRequest]
 
-class PredictionResponse(BaseModel):
+class ForecastResponse(BaseModel):
     pvp_is_competitorA: float
     pvp_is_competitorB: float
+
+class ActualPriceResponse(BaseModel):
+    sku: str
+    time_key: int
+    pvp_is_competitorA: Optional[float]
+    pvp_is_competitorB: Optional[float]
 
 # ------------- Helper Functions -------------
 def prepare_features(data: dict, feature_cols, leaflet_encoder):
@@ -100,6 +105,27 @@ def upsert_forecast_to_db(sku, time_key, pvp_A, pvp_B):
             cur.execute(query, (sku, time_key, pvp_A, pvp_B))
         conn.commit()
 
+def fetch_actual_prices_from_db(sku: str, time_key: int):
+    query = """
+        SELECT sku, time_key, "pvp_is_competitorA", "pvp_is_competitorB"
+        FROM forecasts
+        WHERE sku = %s AND time_key = %s
+        LIMIT 1
+    """
+    with get_pg_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, (sku, time_key))
+            row = cur.fetchone()
+            if row:
+                return {
+                    "sku": row[0],
+                    "time_key": row[1],
+                    "pvp_is_competitorA": row[2],
+                    "pvp_is_competitorB": row[3],
+                }
+            else:
+                return None
+
 # ------------- API Endpoints -------------
 @app.get("/")
 def healthcheck():
@@ -107,8 +133,8 @@ def healthcheck():
         raise HTTPException(status_code=503, detail="Model not loaded")
     return {"status": "ok", "msg": "Competitor Price Forecasting API running"}
 
-@app.post("/predict/", response_model=PredictionResponse)
-def predict(req: PredictionRequest):
+@app.post("/forecast_prices/", response_model=ForecastResponse)
+def forecast_prices(req: ForecastRequest):
     if forecaster is None:
         raise HTTPException(status_code=503, detail="Model not loaded")
     features = prepare_features(req.dict(), feature_cols, leaflet_encoder)
@@ -117,13 +143,13 @@ def predict(req: PredictionRequest):
         preds[comp] = float(forecaster.predict(features, comp)[0])
     # Store in DB
     upsert_forecast_to_db(req.sku, req.time_key, preds.get("competitorA", 0), preds.get("competitorB", 0))
-    return PredictionResponse(
+    return ForecastResponse(
         pvp_is_competitorA=preds.get("competitorA", 0),
         pvp_is_competitorB=preds.get("competitorB", 0)
     )
 
-@app.post("/predict/batch/", response_model=List[PredictionResponse])
-def predict_batch(request: BatchPredictionRequest):
+@app.post("/forecast_prices/batch/", response_model=List[ForecastResponse])
+def forecast_prices_batch(request: BatchForecastRequest):
     results = []
     for item in request.items:
         features = prepare_features(item.dict(), feature_cols, leaflet_encoder)
@@ -131,21 +157,15 @@ def predict_batch(request: BatchPredictionRequest):
         for comp in target_competitors:
             preds[comp] = float(forecaster.predict(features, comp)[0])
         upsert_forecast_to_db(item.sku, item.time_key, preds.get("competitorA", 0), preds.get("competitorB", 0))
-        results.append(PredictionResponse(
+        results.append(ForecastResponse(
             pvp_is_competitorA=preds.get("competitorA", 0),
             pvp_is_competitorB=preds.get("competitorB", 0)
         ))
     return results
 
-@app.get("/product_metadata/{sku}")
-def get_product_metadata(sku: str):
-    query = "SELECT * FROM product_metadata WHERE sku=%s"
-    with get_pg_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(query, (sku,))
-            row = cur.fetchone()
-            if row:
-                columns = [desc[0] for desc in cur.description]
-                return dict(zip(columns, row))
-            else:
-                raise HTTPException(status_code=404, detail="SKU not found")
+@app.get("/actual_prices/", response_model=ActualPriceResponse)
+def actual_prices(sku: str, time_key: int):
+    row = fetch_actual_prices_from_db(sku, time_key)
+    if row is None:
+        raise HTTPException(status_code=404, detail="No actual prices found for given SKU and time_key")
+    return ActualPriceResponse(**row)
