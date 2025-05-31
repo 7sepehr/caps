@@ -27,12 +27,13 @@ forecaster, leaflet_encoder, feature_cols, target_competitors = load_artifacts()
 
 # ------------------- DB Connection -------------------
 def get_pg_conn():
+    # No more localhost or default values - use Railway env vars!
     return psycopg2.connect(
-        dbname=os.getenv("PGDATABASE", "capsstone"),
-        user=os.getenv("PGUSER", "postgres"),
-        password=os.getenv("PGPASSWORD", "1234"),
-        host=os.getenv("PGHOST", "localhost"),
-        port=int(os.getenv("PGPORT", 5432)),
+        dbname=os.environ["PGDATABASE"],
+        user=os.environ["PGUSER"],
+        password=os.environ["PGPASSWORD"],
+        host=os.environ["PGHOST"],
+        port=int(os.environ["PGPORT"]),
     )
 
 # ------------------- Helper Functions -------------------
