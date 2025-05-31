@@ -4,7 +4,8 @@ from pydantic import BaseModel, Field
 import joblib
 import psycopg2
 import pandas as pd
-
+from competitor_price_forecaster import CompetitorPriceForecaster
+from sklearn.preprocessing import LabelEncoder
 # ------------------- Load Model Artifacts -------------------
 MODEL_PATH = "competitor_price_forecaster.pkl"
 LEAFLET_ENCODER_PATH = "leaflet_encoder.pkl"
