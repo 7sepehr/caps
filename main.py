@@ -27,14 +27,8 @@ forecaster, leaflet_encoder, feature_cols, target_competitors = load_artifacts()
 
 # ------------------- DB Connection -------------------
 def get_pg_conn():
-    # No more localhost or default values - use Railway env vars!
-    return psycopg2.connect(
-        dbname=os.environ["PGDATABASE"],
-        user=os.environ["PGUSER"],
-        password=os.environ["PGPASSWORD"],
-        host=os.environ["PGHOST"],
-        port=int(os.environ["PGPORT"]),
-    )
+    # Use the DATABASE_URL environment variable provided by Railway
+    return psycopg2.connect(os.environ["DATABASE_URL"])
 
 # ------------------- Helper Functions -------------------
 def prepare_features(sku, time_key):
