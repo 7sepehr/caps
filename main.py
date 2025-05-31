@@ -1,142 +1,151 @@
 import os
-import joblib
-import pandas as pd
-from datetime import datetime
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from peewee import *
-from playhouse.db_url import connect
-import holidays
+import joblib
+import pandas as pd
+import psycopg2
+from typing import List, Optional
 
-# === Database Setup ===
-DATABASE_URL = os.environ.get("DATABASE_URL")
-if not DATABASE_URL:
-    raise RuntimeError("Environment variable DATABASE_URL is not set.")
+# ------------- Load Artifacts and Model -------------
+MODEL_PATH = "saved_models/competitor_price_forecaster.pkl"
+LEAFLET_ENCODER_PATH = "saved_models/leaflet_encoder.pkl"
+FEATURE_COLUMNS_PATH = "saved_models/feature_columns.pkl"
+TARGET_COMPETITORS_PATH = "saved_models/target_competitors.pkl"
 
-# Connect to PostgreSQL using playhouse.db_url
-DB = connect(DATABASE_URL)
+def load_artifacts():
+    try:
+        forecaster = joblib.load(MODEL_PATH)
+        leaflet_encoder = joblib.load(LEAFLET_ENCODER_PATH)
+        feature_cols = joblib.load(FEATURE_COLUMNS_PATH)
+        target_competitors = joblib.load(TARGET_COMPETITORS_PATH)
+        return forecaster, leaflet_encoder, feature_cols, target_competitors
+    except Exception as e:
+        print(f"Error loading artifacts: {e}")
+        return None, None, None, None
 
-# === Define Forecast Table Schema ===
-class Forecast(Model):
-    sku = CharField()
-    time_key = IntegerField()
-    pvp_is_competitora = FloatField()
-    pvp_is_competitorb = FloatField()
-    pvp_is_competitora_actual = FloatField(null=True)
-    pvp_is_competitorb_actual = FloatField(null=True)
+forecaster, leaflet_encoder, feature_cols, target_competitors = load_artifacts()
 
-    class Meta:
-        database = DB
-        primary_key = CompositeKey("sku", "time_key")
+# ------------- PostgreSQL Connection -------------
+def get_pg_conn():
+    return psycopg2.connect(
+        dbname=os.getenv("PGDATABASE", "capsstone"),
+        user=os.getenv("PGUSER", "postgres"),
+        password=os.getenv("PGPASSWORD", "1234"),
+        host=os.getenv("PGHOST", "localhost"),
+        port=int(os.getenv("PGPORT", 5432)),
+    )
 
-# === Request Payload Schemas ===
-class ForecastRequest(BaseModel):
-    sku: str
-    time_key: int  # Format: YYYYMMDD
+# ------------- FastAPI Setup -------------
+app = FastAPI(
+    title="Competitor Price Forecasting API",
+    description="Predict competitor prices using a LightGBM ensemble model"
+)
 
-class ActualPricesRequest(BaseModel):
+# ------------- Pydantic Schemas -------------
+class PredictionRequest(BaseModel):
     sku: str
     time_key: int
-    pvp_is_competitorA_actual: float
-    pvp_is_competitorB_actual: float
+    pvp_was: float
+    discount: float
+    flag_promo: int
+    leaflet: Optional[str] = "none"
+    structure_level_1: int
+    structure_level_2: int
+    structure_level_3: int
+    structure_level_4: int
+    quantity: float
+    year: int
+    month: int
+    day: int
+    weekday: int
+    quarter: int
+    week_of_year: int
+    is_campaign: int
+    # Optionally: lag/rolling/comparison features if needed
 
-# === Load Trained LightGBM Model ===
-MODEL_PATH = "lightgbm_pipeline_model.pkl"
-if not os.path.exists(MODEL_PATH):
-    raise RuntimeError(f"Model file not found: {MODEL_PATH}")
+class BatchPredictionRequest(BaseModel):
+    items: List[PredictionRequest]
 
-model = joblib.load(MODEL_PATH)
+class PredictionResponse(BaseModel):
+    pvp_is_competitorA: float
+    pvp_is_competitorB: float
 
-# === FastAPI App Initialization ===
-app = FastAPI()
+# ------------- Helper Functions -------------
+def prepare_features(data: dict, feature_cols, leaflet_encoder):
+    df = pd.DataFrame([data])
+    # Leaflet encoding
+    df["leaflet_encoded"] = df["leaflet"].fillna("none")
+    df["leaflet_numeric"] = leaflet_encoder.transform(df["leaflet_encoded"])
+    # Drop original leaflet, keep numeric
+    df = df.drop(columns=["leaflet", "leaflet_encoded"], errors="ignore")
+    # Fill missing columns with 0
+    for col in feature_cols:
+        if col not in df.columns:
+            df[col] = 0
+    # Reorder
+    df = df[feature_cols]
+    df = df.fillna(0)
+    return df
 
-@app.on_event("startup")
-def startup():
-    DB.connect(reuse_if_open=True)
-    DB.create_tables([Forecast], safe=True)
+def upsert_forecast_to_db(sku, time_key, pvp_A, pvp_B):
+    query = """
+        INSERT INTO forecasts (sku, time_key, "pvp_is_competitorA", "pvp_is_competitorB")
+        VALUES (%s, %s, %s, %s)
+        ON CONFLICT (sku, time_key) DO UPDATE
+        SET "pvp_is_competitorA" = EXCLUDED."pvp_is_competitorA",
+            "pvp_is_competitorB" = EXCLUDED."pvp_is_competitorB"
+    """
+    with get_pg_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, (sku, time_key, pvp_A, pvp_B))
+        conn.commit()
 
-# === Endpoint: /forecast_prices/ ===
-@app.post("/forecast_prices/")
-def forecast_prices(req: ForecastRequest):
-    # Validate date format
-    try:
-        dt = datetime.strptime(str(req.time_key), "%Y%m%d")
-    except ValueError:
-        raise HTTPException(status_code=422, detail="Invalid time_key format. Expected YYYYMMDD as integer.")
+# ------------- API Endpoints -------------
+@app.get("/")
+def healthcheck():
+    if forecaster is None:
+        raise HTTPException(status_code=503, detail="Model not loaded")
+    return {"status": "ok", "msg": "Competitor Price Forecasting API running"}
 
-    # Extract calendar-based features
-    month = dt.month
-    dayofweek = dt.weekday()
-    is_weekend = int(dayofweek >= 5)
-    pt_holidays = holidays.CountryHoliday("PT", years=dt.year)
-    is_holiday = int(dt in pt_holidays)
+@app.post("/predict/", response_model=PredictionResponse)
+def predict(req: PredictionRequest):
+    if forecaster is None:
+        raise HTTPException(status_code=503, detail="Model not loaded")
+    features = prepare_features(req.dict(), feature_cols, leaflet_encoder)
+    preds = {}
+    for comp in target_competitors:
+        preds[comp] = float(forecaster.predict(features, comp)[0])
+    # Store in DB
+    upsert_forecast_to_db(req.sku, req.time_key, preds.get("competitorA", 0), preds.get("competitorB", 0))
+    return PredictionResponse(
+        pvp_is_competitorA=preds.get("competitorA", 0),
+        pvp_is_competitorB=preds.get("competitorB", 0)
+    )
 
-    # Construct input features
-    base_features = {
-        "sku": req.sku,
-        "quantity": 1.0,
-        "discount": 0.0,
-        "flag_promo": "0",
-        "leaflet": "None",
-        "structure_level_1": "None",
-        "structure_level_2": "None",
-        "month": month,
-        "dayofweek": dayofweek,
-        "is_weekend": is_weekend,
-        "is_campaign": 0,
-        "is_holiday": is_holiday,
-    }
+@app.post("/predict/batch/", response_model=List[PredictionResponse])
+def predict_batch(request: BatchPredictionRequest):
+    results = []
+    for item in request.items:
+        features = prepare_features(item.dict(), feature_cols, leaflet_encoder)
+        preds = {}
+        for comp in target_competitors:
+            preds[comp] = float(forecaster.predict(features, comp)[0])
+        upsert_forecast_to_db(item.sku, item.time_key, preds.get("competitorA", 0), preds.get("competitorB", 0))
+        results.append(PredictionResponse(
+            pvp_is_competitorA=preds.get("competitorA", 0),
+            pvp_is_competitorB=preds.get("competitorB", 0)
+        ))
+    return results
 
-    # Predict for competitor A
-    df_A = pd.DataFrame([{**base_features, "competitor": "competitora"}])
-    pred_A = float(model.predict(df_A)[0])
-
-    # Predict for competitor B
-    df_B = pd.DataFrame([{**base_features, "competitor": "competitorb"}])
-    pred_B = float(model.predict(df_B)[0])
-
-    # Insert or update forecast in the database
-    Forecast.insert({
-    "sku": req.sku,
-    "time_key": req.time_key,
-    "pvp_is_competitora": pred_A,
-    "pvp_is_competitorb": pred_B,
-}).on_conflict(
-    conflict_target=["sku", "time_key"],
-    preserve=["sku", "time_key"],
-    update={
-        "pvp_is_competitora": pred_A,
-        "pvp_is_competitorb": pred_B,
-    }
-).execute()
-
-    return {
-        "sku": req.sku,
-        "time_key": req.time_key,
-        "pvp_is_competitora": pred_A,
-        "pvp_is_competitorb": pred_B,
-    }
-
-# === Endpoint: /actual_prices/ ===
-@app.post("/actual_prices/")
-def actual_prices(req: ActualPricesRequest):
-    # Look up the forecast record
-    record = Forecast.get_or_none((Forecast.sku == req.sku) & (Forecast.time_key == req.time_key))
-    if not record:
-        raise HTTPException(status_code=422, detail="Forecast not found for this SKU and date.")
-
-    # Save the actual prices
-    PA=record.pvp_is_competitora
-    PB=record.pvp_is_competitorb
-    record.pvp_is_competitora = req.pvp_is_competitorA_actual
-    record.pvp_is_competitorb = req.pvp_is_competitorB_actual
-    record.save()
-
-    return {
-        "sku": record.sku,
-        "time_key": record.time_key,
-        "pvp_is_competitorA": PA,
-        "pvp_is_competitorB": PB,
-        "pvp_is_competitorA_actual": req.pvp_is_competitorA_actual,
-        "pvp_is_competitorB_actual": req.pvp_is_competitorB_actual,
-    }
+@app.get("/product_metadata/{sku}")
+def get_product_metadata(sku: str):
+    query = "SELECT * FROM product_metadata WHERE sku=%s"
+    with get_pg_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, (sku,))
+            row = cur.fetchone()
+            if row:
+                columns = [desc[0] for desc in cur.description]
+                return dict(zip(columns, row))
+            else:
+                raise HTTPException(status_code=404, detail="SKU not found")
