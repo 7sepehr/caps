@@ -6,10 +6,10 @@ import psycopg2
 import pandas as pd
 
 # ------------------- Load Model Artifacts -------------------
-MODEL_PATH = "saved_models/competitor_price_forecaster.pkl"
-LEAFLET_ENCODER_PATH = "saved_models/leaflet_encoder.pkl"
-FEATURE_COLUMNS_PATH = "saved_models/feature_columns.pkl"
-TARGET_COMPETITORS_PATH = "saved_models/target_competitors.pkl"
+MODEL_PATH = "competitor_price_forecaster.pkl"
+LEAFLET_ENCODER_PATH = "leaflet_encoder.pkl"
+FEATURE_COLUMNS_PATH = "feature_columns.pkl"
+TARGET_COMPETITORS_PATH = "target_competitors.pkl"
 
 def load_artifacts():
     try:
