@@ -1,9 +1,8 @@
-fastapi
-uvicorn[standard]
-pydantic
-psycopg2-binary
-joblib
-pandas
-scikit-learn
 lightgbm
-python-dotenv
+scikit-learn
+joblib
+numpy
+pandas
+# Add FastAPI if you want an API:
+# fastapi
+# uvicorn[standard]
